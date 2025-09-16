@@ -1,0 +1,16 @@
+# Personal data (IMPORTANT!)
+data/raw/*
+!data/raw/.gitkeep
+
+# Model weights
+models/base/*
+models/fine_tuned/*
+!models/*/.gitkeep
+
+# Logs and temp files
+logs/
+*.log
+.env
+
+# OS specific
+.DS_Store

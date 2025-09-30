@@ -1,0 +1,11 @@
+# Development tools
+jupyterlab>=4.0.0
+ipywidgets>=8.1.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.17.0
+
+# Code quality
+flake8>=6.1.0
+mypy>=1.6.0
+pre-commit>=3.4.0

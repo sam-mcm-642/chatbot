@@ -14,3 +14,7 @@ logs/
 
 # OS specific
 .DS_Store
+
+# Desktop app wrapper
+Personal Chatbot-darwin-*/
+*.app

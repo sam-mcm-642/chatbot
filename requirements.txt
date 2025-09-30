@@ -5,7 +5,7 @@ sentence-transformers>=2.2.2
 datasets>=2.14.0
 
 # Apple Silicon optimization
-mlx>=0.0.1
+mlx-lm>=0.0.1
 
 # Data processing
 pandas>=2.0.0

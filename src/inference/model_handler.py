@@ -4,7 +4,7 @@ import gc
 from typing import Optional
 
 class ChatbotModel:
-    def __init__(self, model_name: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"):
+    def __init__(self, model_name: str = "mlx-community/Llama-3.2-3B-Instruct-4bit"):
         self.model_name = model_name
         self.model = None
         self.tokenizer = None

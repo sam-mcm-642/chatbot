@@ -2,6 +2,9 @@
 data/raw/*
 !data/raw/.gitkeep
 
+#Everything from data folder
+data/*
+
 # Model weights
 models/base/*
 models/fine_tuned/*

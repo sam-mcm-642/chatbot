@@ -69,10 +69,10 @@ def main():
         if model_ready:
             st.subheader("Generation Settings")
             temperature = st.slider("Temperature", 0.1, 1.0, 0.7, 0.1)
-            max_length = st.slider("Max Response Length", 50, 1000, 512, 50)
+            max_tokens = st.slider("Max Response Length", 50, 1000, 512, 50)
         else:
             temperature = 0.7
-            max_length = 512
+            max_tokens = 512
         
         # Chat management
         st.subheader("Chat Management")
@@ -129,7 +129,7 @@ def main():
                     user_input=prompt,
                     conversation_history=st.session_state.messages[:-1],
                     temperature=temperature,
-                    max_length=max_length
+                    max_tokens=max_tokens
                 )
                 st.markdown(response)
         

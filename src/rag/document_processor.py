@@ -4,8 +4,6 @@ from typing import List, Dict
 import re
 from datetime import datetime
 
-
-
 class DocumentProcessor:
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
         """
@@ -138,102 +136,188 @@ class DocumentProcessor:
     
     def process_craft_weekly_targets(self, file_path: str) -> List[Dict]:
         """
-        Process Craft weekly targets with specific format:
-        # ::DD/MM/YY: Weekly Targets::
+        Process Craft weekly targets - handles both old and new formats
+        
+        Old format (2024): Simple list with Result section
+        New format (2025): Full Challenge/Result/Reflection sections
         """
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Extract date from title
-        date_match = re.search(r'#\s*::(\d{2}/\d{2}/\d{2}):\s*Weekly Targets::', content)
+        # Extract date from title - handles both ::DD/MM/YY:: and other variations
+        date_match = re.search(r'#\s*::(\d{2}/\d{2}/\d{2,4}):\s*Weekly Targets::', content)
         week_date = None
         if date_match:
-            # Convert DD/MM/YY to YYYY-MM-DD for consistency
             date_str = date_match.group(1)
             try:
-                dt = datetime.strptime(date_str, '%d/%m/%y')
+                # Try DD/MM/YY format first
+                if len(date_str.split('/')[-1]) == 2:
+                    dt = datetime.strptime(date_str, '%d/%m/%y')
+                else:
+                    dt = datetime.strptime(date_str, '%d/%m/%Y')
                 week_date = dt.strftime('%Y-%m-%d')
             except:
-                week_date = date_str
-        
-        # Clean Craft-specific syntax
-        cleaned_content = self.clean_craft_syntax(content)
+                week_date = date_str  # Keep original if parsing fails
         
         # Extract tasks and metadata
         tasks_data = self.extract_weekly_tasks(content)
         
-        # Build comprehensive metadata
+        # Build metadata - only non-None values
         metadata = {
             'source': 'craft',
             'doc_type': 'weekly_targets',
             'filename': Path(file_path).name,
-            'filepath': str(file_path),
-            'week_date': week_date,
-            'total_tasks': tasks_data['total_tasks'],
-            'completed_tasks': tasks_data['completed_tasks'],
-            'completion_rate': tasks_data['completion_rate'],
-            'high_priority_tasks': tasks_data['high_priority_count'],
-            'has_reflection': tasks_data['has_reflection']
         }
         
-        # Create chunks
-        # Chunk 1: Tasks list
-        tasks_section = self.extract_section(content, start='# ::', end='**::Low Priority::')
-        if tasks_section:
-            chunks = [{
-                'text': self.clean_craft_syntax(tasks_section),
-                'metadata': {**metadata, 'section': 'main_tasks'}
-            }]
-        else:
-            chunks = []
+        if week_date:
+            metadata['week_date'] = week_date
         
-        # Chunk 2: Low priority tasks if present
-        low_priority = self.extract_section(content, start='**::Low Priority::', end='### ::Challenge::')
-        if low_priority:
+        if tasks_data['total_tasks'] > 0:
+            metadata['total_tasks'] = tasks_data['total_tasks']
+            metadata['completed_tasks'] = tasks_data['completed_tasks']
+            metadata['completion_rate'] = tasks_data['completion_rate']
+        
+        if tasks_data['high_priority_count'] > 0:
+            metadata['high_priority_tasks'] = tasks_data['high_priority_count']
+        
+        if tasks_data['has_reflection']:
+            metadata['has_reflection'] = True
+        
+        # Determine format (old vs new)
+        has_challenge_section = '### ::Challenge::' in content
+        metadata['format'] = 'new' if has_challenge_section else 'old'
+        
+        chunks = []
+        
+        # Main tasks section (always present)
+        tasks_section = self.extract_tasks_section(content)
+        if tasks_section:
             chunks.append({
-                'text': self.clean_craft_syntax(low_priority),
-                'metadata': {**metadata, 'section': 'low_priority'}
+                'text': self.clean_craft_syntax(tasks_section),
+                'metadata': {**metadata, 'section': 'main_tasks'},
+                'chunk_id': 0
             })
         
-        # Chunk 3: Reflection sections
+        # Reflection sections (only if they have content)
         reflection_sections = self.extract_reflection_sections(content)
-        for section_name, section_content in reflection_sections.items():
-            if section_content.strip():
-                chunks.append({
-                    'text': self.clean_craft_syntax(section_content),
-                    'metadata': {**metadata, 'section': section_name}
-                })
+        chunk_id = 1
         
-        # If no structured chunks, fall back to full document
+        for section_name, section_content in reflection_sections.items():
+            # Only add if there's actual content (not just empty or whitespace)
+            cleaned = section_content.strip()
+            if cleaned and len(cleaned) > 10:  # At least 10 chars of content
+                chunks.append({
+                    'text': cleaned,
+                    'metadata': {**metadata, 'section': section_name},
+                    'chunk_id': chunk_id
+                })
+                chunk_id += 1
+        
+        # If no structured chunks, create one from full document
         if not chunks:
             chunks = [{
-                'text': cleaned_content,
-                'metadata': metadata
+                'text': self.clean_craft_syntax(content),
+                'metadata': metadata,
+                'chunk_id': 0
             }]
         
         return chunks
     
-    def clean_craft_syntax(self, text: str) -> str:
-        """Remove Craft-specific syntax like ::text::"""
-        # Remove highlight markers
-        text = re.sub(r'::([^:]+)::', r'\1', text)
-        # Clean up whitespace
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        return text.strip()
+    def extract_tasks_section(self, content: str) -> str:
+        """
+        Extract just the tasks section (everything up to Low Priority or first ###)
+        """
+        # Find the start (after the title)
+        title_end = re.search(r'#\s*::.*?::\s*\n', content)
+        if not title_end:
+            return content
+        
+        start = title_end.end()
+        
+        # Find the end (Low Priority marker or first ### section)
+        low_priority_match = re.search(r'\*\*::Low Priority::', content[start:])
+        section_match = re.search(r'###\s*::', content[start:])
+        result_match = re.search(r'::Result:::', content[start:])
+        
+        # Use whichever comes first
+        end_positions = [
+            low_priority_match.start() if low_priority_match else None,
+            section_match.start() if section_match else None,
+            result_match.start() if result_match else None
+        ]
+        end_positions = [pos for pos in end_positions if pos is not None]
+        
+        if end_positions:
+            end = start + min(end_positions)
+            return content[start:end]
+        else:
+            return content[start:]
+    
+    def extract_reflection_sections(self, content: str) -> Dict[str, str]:
+        """
+        Extract Challenge, Result, and Reflection sections
+        Only returns sections with actual content
+        """
+        sections = {}
+        
+        # Challenge section
+        challenge_match = re.search(
+            r'### ::Challenge::\s*\n(.*?)(?=### ::Result::|### ::Reflection::|$)',
+            content,
+            re.DOTALL
+        )
+        if challenge_match:
+            challenge_text = challenge_match.group(1).strip()
+            # Remove separator lines
+            challenge_text = re.sub(r'^-+$', '', challenge_text, flags=re.MULTILINE).strip()
+            if challenge_text:
+                sections['challenge'] = challenge_text
+        
+        # Result section (handles both ::Result::: and ### ::Result::)
+        result_match = re.search(
+            r'(?:::Result::::|### ::Result::)\s*\n(.*?)(?=### ::Reflection::|### ::Challenge::|$)',
+            content,
+            re.DOTALL
+        )
+        if result_match:
+            result_text = result_match.group(1).strip()
+            # Remove separator lines and template questions if empty
+            result_text = re.sub(r'^-+$', '', result_text, flags=re.MULTILINE).strip()
+            # Remove empty template questions
+            result_text = re.sub(r'^What did I do that I shouldn\'t.*?\n*', '', result_text, flags=re.MULTILINE)
+            result_text = re.sub(r'^What went well\?\s*\n*', '', result_text, flags=re.MULTILINE)
+            result_text = result_text.strip()
+            
+            if result_text:
+                sections['result'] = result_text
+        
+        # Reflection section
+        reflection_match = re.search(
+            r'### ::Reflection::\s*\n(.+)',
+            content,
+            re.DOTALL
+        )
+        if reflection_match:
+            reflection_text = reflection_match.group(1).strip()
+            if reflection_text:
+                sections['reflection'] = reflection_text
+        
+        return sections
     
     def extract_weekly_tasks(self, content: str) -> Dict:
         """
         Extract task statistics from weekly targets
+        Handles both old and new formats
         """
-        # Find all tasks (including low priority)
-        task_pattern = r'^[-*]\s*\[([ x])\]\s*(.+)$'
+        # Find all tasks (checkbox items)
+        task_pattern = r'^[-*]\s*\[([ xX])\]\s*(.+)$'
         tasks = []
         
         for match in re.finditer(task_pattern, content, re.MULTILINE):
             completed = match.group(1).lower() == 'x'
             task_text = match.group(2).strip()
             
-            # Check if it's highlighted/high priority
+            # Check if highlighted/high priority
             is_highlighted = '::Highlight::' in task_text or '::highlight::' in task_text
             
             # Clean the task text
@@ -249,8 +333,13 @@ class DocumentProcessor:
         completed = sum(1 for t in tasks if t['completed'])
         highlighted = sum(1 for t in tasks if t['highlighted'])
         
-        # Check if reflection is filled out
-        has_reflection = bool(re.search(r'### ::Reflection::\s*\n+\w+', content))
+        # Check if there's actual reflection content (not just template)
+        has_reflection = False
+        reflection_match = re.search(r'### ::Reflection::\s*\n(.+)', content, re.DOTALL)
+        if reflection_match:
+            reflection_text = reflection_match.group(1).strip()
+            # Must have more than just whitespace
+            has_reflection = len(reflection_text) > 0
         
         return {
             'total_tasks': total,
@@ -261,42 +350,16 @@ class DocumentProcessor:
             'tasks': tasks
         }
     
-    def extract_section(self, content: str, start: str, end: str = None) -> str:
-        """Extract content between two markers"""
-        start_idx = content.find(start)
-        if start_idx == -1:
-            return ""
-        
-        if end:
-            end_idx = content.find(end, start_idx)
-            if end_idx == -1:
-                return content[start_idx:]
-            return content[start_idx:end_idx]
-        else:
-            return content[start_idx:]
-    
-    def extract_reflection_sections(self, content: str) -> Dict[str, str]:
-        """
-        Extract Challenge, Result, and Reflection sections
-        """
-        sections = {}
-        
-        # Challenge section
-        challenge = self.extract_section(content, '### ::Challenge::', '### ::Result::')
-        if challenge:
-            sections['challenge'] = challenge.replace('### ::Challenge::', '').strip()
-        
-        # Result section
-        result = self.extract_section(content, '### ::Result::', '### ::Reflection::')
-        if result:
-            sections['result'] = result.replace('### ::Result::', '').strip()
-        
-        # Reflection section
-        reflection_match = re.search(r'### ::Reflection::\s*(.+)', content, re.DOTALL)
-        if reflection_match:
-            sections['reflection'] = reflection_match.group(1).strip()
-        
-        return sections
+    def clean_craft_syntax(self, text: str) -> str:
+        """Remove Craft-specific syntax like ::text::"""
+        # Remove highlight markers but keep the text
+        text = re.sub(r'::([Hh]ighlight):::\s*', '', text)
+        text = re.sub(r'::([^:]+)::', r'\1', text)
+        # Clean up whitespace
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        # Remove horizontal rules
+        text = re.sub(r'^-{3,}$', '', text, flags=re.MULTILINE)
+        return text.strip()
     
     def process_all_weekly_targets(self, directory: str) -> List[Dict]:
         """
@@ -305,37 +368,39 @@ class DocumentProcessor:
         all_chunks = []
         directory_path = Path(directory)
         
-        # Find all markdown files that look like weekly targets
+        # Find all markdown files (including nested)
         files = list(directory_path.glob("**/*.md"))
-        target_files = [f for f in files if 'weekly' in f.name.lower() or 'target' in f.name.lower()]
         
-        if not target_files:
-            # Fall back to all markdown files
-            target_files = files
+        print(f"Found {len(files)} markdown files")
         
-        print(f"Found {len(target_files)} weekly target documents")
-        
-        for file_path in sorted(target_files):
+        for file_path in sorted(files):
             print(f"Processing: {file_path.name}")
             
             try:
                 chunks = self.process_craft_weekly_targets(str(file_path))
-                all_chunks.extend(chunks)
                 
-                # Show stats for this week
-                if chunks and chunks[0]['metadata'].get('week_date'):
+                if chunks:
+                    # Show info about this week
                     meta = chunks[0]['metadata']
-                    print(f"  Week: {meta['week_date']}")
-                    print(f"  Tasks: {meta['completed_tasks']}/{meta['total_tasks']} " +
-                          f"({meta['completion_rate']}%)")
+                    week_date = meta.get('week_date', 'unknown')
+                    completed = meta.get('completed_tasks', 0)
+                    total = meta.get('total_tasks', 0)
+                    rate = meta.get('completion_rate', 0)
+                    
+                    print(f"  Week: {week_date}")
+                    print(f"  Tasks: {completed}/{total} ({rate}%)")
+                    print(f"  Chunks created: {len(chunks)}")
+                    
+                    all_chunks.extend(chunks)
+                else:
+                    print(f"  ⚠️  No chunks created")
+                    
             except Exception as e:
-                print(f"  Error: {e}")
+                print(f"  ❌ Error: {e}")
                 continue
         
         print(f"\nProcessed {len(all_chunks)} total chunks from weekly targets")
         return all_chunks
-    
-    
 
 
 if __name__ == "__main__":
@@ -353,204 +418,3 @@ if __name__ == "__main__":
         json.dump(chunks, f, indent=2)
     
     print(f"Saved {len(chunks)} chunks to {output_path}")
-    
-    def process_craft_weekly_targets(self, file_path: str) -> List[Dict]:
-        """
-        Process Craft weekly targets with specific format:
-        # ::DD/MM/YY: Weekly Targets::
-        """
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Extract date from title
-        date_match = re.search(r'#\s*::(\d{2}/\d{2}/\d{2}):\s*Weekly Targets::', content)
-        week_date = None
-        if date_match:
-            # Convert DD/MM/YY to YYYY-MM-DD for consistency
-            date_str = date_match.group(1)
-            try:
-                dt = datetime.strptime(date_str, '%d/%m/%y')
-                week_date = dt.strftime('%Y-%m-%d')
-            except:
-                week_date = date_str
-        
-        # Clean Craft-specific syntax
-        cleaned_content = self.clean_craft_syntax(content)
-        
-        # Extract tasks and metadata
-        tasks_data = self.extract_weekly_tasks(content)
-        
-        # Build comprehensive metadata
-        metadata = {
-            'source': 'craft',
-            'doc_type': 'weekly_targets',
-            'filename': Path(file_path).name,
-            'filepath': str(file_path),
-            'week_date': week_date,
-            'total_tasks': tasks_data['total_tasks'],
-            'completed_tasks': tasks_data['completed_tasks'],
-            'completion_rate': tasks_data['completion_rate'],
-            'high_priority_tasks': tasks_data['high_priority_count'],
-            'has_reflection': tasks_data['has_reflection']
-        }
-        
-        # Create chunks
-        # Chunk 1: Tasks list
-        tasks_section = self.extract_section(content, start='# ::', end='**::Low Priority::')
-        if tasks_section:
-            chunks = [{
-                'text': self.clean_craft_syntax(tasks_section),
-                'metadata': {**metadata, 'section': 'main_tasks'}
-            }]
-        else:
-            chunks = []
-        
-        # Chunk 2: Low priority tasks if present
-        low_priority = self.extract_section(content, start='**::Low Priority::', end='### ::Challenge::')
-        if low_priority:
-            chunks.append({
-                'text': self.clean_craft_syntax(low_priority),
-                'metadata': {**metadata, 'section': 'low_priority'}
-            })
-        
-        # Chunk 3: Reflection sections
-        reflection_sections = self.extract_reflection_sections(content)
-        for section_name, section_content in reflection_sections.items():
-            if section_content.strip():
-                chunks.append({
-                    'text': self.clean_craft_syntax(section_content),
-                    'metadata': {**metadata, 'section': section_name}
-                })
-        
-        # If no structured chunks, fall back to full document
-        if not chunks:
-            chunks = [{
-                'text': cleaned_content,
-                'metadata': metadata
-            }]
-        
-        return chunks
-    
-    def clean_craft_syntax(self, text: str) -> str:
-        """Remove Craft-specific syntax like ::text::"""
-        # Remove highlight markers
-        text = re.sub(r'::([^:]+)::', r'\1', text)
-        # Clean up whitespace
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        return text.strip()
-    
-    def extract_weekly_tasks(self, content: str) -> Dict:
-        """
-        Extract task statistics from weekly targets
-        """
-        # Find all tasks (including low priority)
-        task_pattern = r'^[-*]\s*\[([ x])\]\s*(.+)$'
-        tasks = []
-        
-        for match in re.finditer(task_pattern, content, re.MULTILINE):
-            completed = match.group(1).lower() == 'x'
-            task_text = match.group(2).strip()
-            
-            # Check if it's highlighted/high priority
-            is_highlighted = '::Highlight::' in task_text or '::highlight::' in task_text
-            
-            # Clean the task text
-            clean_text = self.clean_craft_syntax(task_text)
-            
-            tasks.append({
-                'text': clean_text,
-                'completed': completed,
-                'highlighted': is_highlighted
-            })
-        
-        total = len(tasks)
-        completed = sum(1 for t in tasks if t['completed'])
-        highlighted = sum(1 for t in tasks if t['highlighted'])
-        
-        # Check if reflection is filled out
-        has_reflection = bool(re.search(r'### ::Reflection::\s*\n+\w+', content))
-        
-        return {
-            'total_tasks': total,
-            'completed_tasks': completed,
-            'completion_rate': round((completed / total * 100) if total > 0 else 0, 1),
-            'high_priority_count': highlighted,
-            'has_reflection': has_reflection,
-            'tasks': tasks
-        }
-    
-    def extract_section(self, content: str, start: str, end: str = None) -> str:
-        """Extract content between two markers"""
-        start_idx = content.find(start)
-        if start_idx == -1:
-            return ""
-        
-        if end:
-            end_idx = content.find(end, start_idx)
-            if end_idx == -1:
-                return content[start_idx:]
-            return content[start_idx:end_idx]
-        else:
-            return content[start_idx:]
-    
-    def extract_reflection_sections(self, content: str) -> Dict[str, str]:
-        """
-        Extract Challenge, Result, and Reflection sections
-        """
-        sections = {}
-        
-        # Challenge section
-        challenge = self.extract_section(content, '### ::Challenge::', '### ::Result::')
-        if challenge:
-            sections['challenge'] = challenge.replace('### ::Challenge::', '').strip()
-        
-        # Result section
-        result = self.extract_section(content, '### ::Result::', '### ::Reflection::')
-        if result:
-            sections['result'] = result.replace('### ::Result::', '').strip()
-        
-        # Reflection section
-        reflection_match = re.search(r'### ::Reflection::\s*(.+)', content, re.DOTALL)
-        if reflection_match:
-            sections['reflection'] = reflection_match.group(1).strip()
-        
-        return sections
-    
-    def process_all_weekly_targets(self, directory: str) -> List[Dict]:
-        """
-        Process all weekly target documents in a directory
-        """
-        all_chunks = []
-        directory_path = Path(directory)
-        
-        # Find all markdown files that look like weekly targets
-        files = list(directory_path.glob("**/*.md"))
-        target_files = [f for f in files if 'weekly' in f.name.lower() or 'target' in f.name.lower()]
-        
-        if not target_files:
-            # Fall back to all markdown files
-            target_files = files
-        
-        print(f"Found {len(target_files)} weekly target documents")
-        
-        for file_path in sorted(target_files):
-            print(f"Processing: {file_path.name}")
-            
-            try:
-                chunks = self.process_craft_weekly_targets(str(file_path))
-                all_chunks.extend(chunks)
-                
-                # Show stats for this week
-                if chunks and chunks[0]['metadata'].get('week_date'):
-                    meta = chunks[0]['metadata']
-                    print(f"  Week: {meta['week_date']}")
-                    print(f"  Tasks: {meta['completed_tasks']}/{meta['total_tasks']} " +
-                          f"({meta['completion_rate']}%)")
-            except Exception as e:
-                print(f"  Error: {e}")
-                continue
-        
-        print(f"\nProcessed {len(all_chunks)} total chunks from weekly targets")
-        return all_chunks
- 
-    
